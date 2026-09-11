@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -18,6 +19,17 @@ MODELS = {
 COMMON_FILES = ("config.json", "weights_manifest.json", "LICENSE", "THIRD_PARTY_NOTICES.md",
                 "licenses/SnakeBeta-NVIDIA-MIT.txt", "licenses/stable-audio-tools-MIT.txt")
 folder_paths.add_model_folder_path("yue2", str(Path(folder_paths.models_dir) / "yue2"))
+
+_LOG_INTERVAL_BYTES = 8 * 1024 * 1024
+_LOG_INTERVAL_SECONDS = 1.0
+
+
+def _format_bytes(n):
+    n = float(max(0, n))
+    for unit, scale in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= scale or unit == "KB":
+            return f"{n / scale:.2f} {unit}"
+    return f"{int(n)} B"
 
 
 def digest(path):
@@ -43,25 +55,55 @@ def transfer(name, revision, filename, target):
     if partial.is_symlink():
         raise ValueError("YuE2 partial download must not be a symlink")
     offset = partial.stat().st_size if partial.exists() else 0
-    request = Request(f"https://huggingface.co/m-a-p/{name}/resolve/{revision}/{filename}",
-                      headers={"Range": f"bytes={offset}-"} if offset else {})
-    logging.info("YuE2: downloading %s/%s", name, filename)
+    url = "https://huggingface.co/m-a-p/{0}/resolve/{1}/{2}".format(name, revision, filename)
+    request = Request(url, headers={"Range": f"bytes={offset}-"} if offset else {})
+    if offset:
+        logging.info("YuE2: resuming %s/%s from %s", name, filename, _format_bytes(offset))
+    else:
+        logging.info("YuE2: downloading %s/%s", name, filename)
     with urlopen(request, timeout=120) as response:
         resumed = offset > 0 and response.status == 206
         if resumed and not response.headers.get("Content-Range", "").startswith(f"bytes {offset}-"):
             raise ValueError("Unexpected download resume offset")
         completed = offset if resumed else 0
         total = completed + int(response.headers.get("Content-Length", 0))
+        if total:
+            logging.info("YuE2: %s/%s size %s%s", name, filename, _format_bytes(total),
+                         " (resume)" if resumed else "")
         progress = ProgressBar(max(total, 1))
+        started = time.perf_counter()
+        last_log_bytes = completed
+        last_log_time = started
         with partial.open("ab" if resumed else "wb") as stream:
             while block := response.read(4 * 1024 * 1024):
                 throw_exception_if_processing_interrupted()
                 stream.write(block)
                 completed += len(block)
                 progress.update_absolute(completed, max(total, completed))
+                now = time.perf_counter()
+                if (completed - last_log_bytes >= _LOG_INTERVAL_BYTES
+                        or now - last_log_time >= _LOG_INTERVAL_SECONDS
+                        or (total and completed >= total)):
+                    elapsed = max(now - started, 1e-6)
+                    speed = (completed - (offset if resumed else 0)) / elapsed
+                    if total:
+                        pct = 100.0 * completed / total
+                        logging.info(
+                            "YuE2: %s/%s %s / %s (%.1f%%) @ %s/s",
+                            name, filename, _format_bytes(completed), _format_bytes(total), pct, _format_bytes(speed),
+                        )
+                    else:
+                        logging.info(
+                            "YuE2: %s/%s %s downloaded @ %s/s",
+                            name, filename, _format_bytes(completed), _format_bytes(speed),
+                        )
+                    last_log_bytes = completed
+                    last_log_time = now
         if total and completed != total:
             raise IOError(f"Incomplete YuE2 download: {filename}; queue again to resume")
     os.replace(partial, target)
+    elapsed = max(time.perf_counter() - started, 1e-6)
+    logging.info("YuE2: finished %s/%s (%s in %.1fs)", name, filename, _format_bytes(completed), elapsed)
 
 
 def resolve(name, download=True):
@@ -79,6 +121,11 @@ def resolve(name, download=True):
         raise FileNotFoundError(f"Install {name} in {target} or enable download_missing")
     target.mkdir(parents=True, exist_ok=True)
     with FileLock(str(contained(target, ".download.lock"))):
+        missing = [filename for filename in files + ["model.safetensors"] if not contained(target, filename).is_file()]
+        if missing and download:
+            logging.info("YuE2: installing %s (%d missing file(s): %s)", name, len(missing), ", ".join(missing))
+        elif not missing:
+            logging.info("YuE2: %s files present at %s", name, target)
         for filename in files + ["model.safetensors"]:
             path = contained(target, filename)
             if not path.is_file():
@@ -96,10 +143,14 @@ def resolve(name, download=True):
                            for filename in files + ["model.safetensors"]}}
         previous = json.loads(stamp.read_text()) if stamp.is_file() else None
         if previous != state:
+            logging.info("YuE2: verifying %s weights (%s)", name, _format_bytes(weight.stat().st_size))
             expected = manifest["files"]["model.safetensors"]
             if weight.stat().st_size != expected["bytes"] or digest(weight) != expected["sha256"]:
                 raise ValueError(f"Corrupt YuE2 weights: {weight}. Remove that file and queue again to download it.")
             temporary = contained(target, ".verified.tmp")
             temporary.write_text(json.dumps(state), encoding="utf-8")
             os.replace(temporary, stamp)
+            logging.info("YuE2: %s weights verified", name)
+        else:
+            logging.info("YuE2: %s verification stamp OK", name)
     return target
