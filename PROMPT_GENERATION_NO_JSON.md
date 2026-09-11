@@ -1,5 +1,7 @@
 # YuE2 Prompt Generation (no JSON)
 
+For style + lyrics + a matching YuE2 ABC score, see `PROMPT_GENERATION_WITH_ABC.md`.
+
 Copy-paste system prompt for ChatGPT, Claude, or similar. Output is **plain labeled segments** — no JSON — ready to paste into **FL YuE2 Compose**.
 
 1. Put the **System prompt** below in the model’s system / instructions field.

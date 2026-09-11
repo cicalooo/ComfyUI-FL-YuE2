@@ -64,6 +64,7 @@ class ScoreEditor {
             data.roll.tracks = {Vocal: [], Ins: []}; data.roll.chords = []; data.roll.sections = [{name: "verse", bars: 4}];
         }), true);
         button(toolbar, "Advanced ABC", () => { this.roll.pause(); this.piano.hidden = true; this.raw.hidden = false; }, true);
+        button(toolbar, "Paste ABC", () => this.pasteAbc(), true);
         button(toolbar, "Import ABC", () => this.file.click(), true);
         button(toolbar, "Export ABC", () => this.export(), true);
         this.undoButton = button(toolbar, "Undo", () => this.restore(false), true);
@@ -75,8 +76,8 @@ class ScoreEditor {
         this.file.onchange = async () => {
             const file = this.file.files[0]; if (!file) return;
             if (file.size > 200000) return this.status("Maximum score file size is 200 KB.", true);
-            this.undo.push(this.source.value); this.redo = []; this.write(await file.text());
-            if (await this.validate()) this.showPiano(); this.file.value = "";
+            await this.applyImportedAbc(await file.text());
+            this.file.value = "";
         };
         this.message = el("div", "Loading score…", this.content); this.message.className = "status";
         this.piano = el("div", null, this.content); this.roll = new PianoRoll(this);
@@ -87,10 +88,44 @@ class ScoreEditor {
             this.write(this.raw.value); clearTimeout(this.timer); this.timer = setTimeout(() => this.validate(), 450);
         };
         el("p", "Preview plays a simple melody sound. YuE2 creates the finished instruments and production when you queue the workflow.", this.content).className = "help";
+        el("p", "LLM scores: Paste ABC (clipboard) or Import ABC (.abc/.txt), or wire text into the incoming_score_abc input. Prefer planning=full when feeding a supplied score into Compose.", this.content).className = "help";
         this.observer = new ResizeObserver(() => this.scheduleLayout());
         this.observer.observe(this.content);
         this.load();
     }
+
+    extractScoreAbc(text) {
+        const labeled = text.match(/###\s*SCORE_ABC\s*\r?\n([\s\S]*?)(?=\r?\n###\s+[A-Z]|$)/i);
+        if (labeled) return labeled[1].trim();
+        const fenced = text.match(/```(?:abc)?\s*([\s\S]*?)```/i);
+        if (fenced && /\bX:\s*\d+/i.test(fenced[1])) return fenced[1].trim();
+        return null;
+    }
+    async applyImportedAbc(text) {
+        text = (text || "").replace(/^\uFEFF/, "").trim();
+        if (!text) return this.status("No ABC text to import.", true);
+        if (text.length > 200000) return this.status("Maximum score size is 200 KB.", true);
+        this.undo.push(this.source.value); this.redo = [];
+        this.write(text);
+        if (await this.validate()) this.showPiano();
+    }
+    async pasteAbc() {
+        let text = "";
+        try {
+            text = await navigator.clipboard.readText();
+        } catch {
+            this.roll.pause();
+            this.piano.hidden = true;
+            this.raw.hidden = false;
+            this.raw.focus();
+            return this.status("Clipboard blocked — paste into Advanced ABC, then open Piano roll.", true);
+        }
+        text = (text || "").trim();
+        if (!text) return this.status("Clipboard is empty.", true);
+        const extracted = this.extractScoreAbc(text);
+        await this.applyImportedAbc(extracted || text);
+    }
+
     scheduleLayout() {
         cancelAnimationFrame(this.layoutFrame);
         this.layoutFrame = requestAnimationFrame(() => {
@@ -114,7 +149,9 @@ class ScoreEditor {
     connectionChanged() {
         const link = this.node.inputs?.find(input => input.name === "incoming_score_abc")?.link ?? null;
         if (link !== this.link) { this.link = link; this.revision++; this.roll.pause(); }
-        this.connectionText.textContent = this.connected ? "Editable score. Queue to load upstream changes; unchanged input keeps your edits." : "Edits are saved in this workflow.";
+        this.connectionText.textContent = this.connected
+            ? "Linked to incoming_score_abc. Queue to load upstream ABC; unchanged input keeps your edits."
+            : "Paste ABC / Import ABC for LLM scores, or connect a STRING to incoming_score_abc.";
     }
     async receive(text, sourceHash) {
         if (!this.connected) return;

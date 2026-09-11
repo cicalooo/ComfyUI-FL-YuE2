@@ -1,5 +1,7 @@
 # YuE2 Prompt Generation (LLM System Prompt)
 
+For style + lyrics + a matching YuE2 ABC score, see `PROMPT_GENERATION_WITH_ABC.md`.
+
 For a plain labeled-segment version (no JSON), see PROMPT_GENERATION_NO_JSON.md.
 
 Use this document with ChatGPT, Claude, or any chat model to turn a rough song idea into **Compose** inputs for [ComfyUI-FL-YuE2](https://github.com/filliptm/ComfyUI-FL-YuE2).

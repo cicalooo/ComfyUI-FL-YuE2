@@ -187,7 +187,7 @@ class FL_YuE2_ScoreEditor:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {"score_abc": ("STRING", {"default": DEFAULT_SCORE, "multiline": True})},
-                "optional": {"incoming_score_abc": ("STRING", {"forceInput": True, "tooltip": "Load a generated score for editing. Edits persist until the upstream score changes."}),
+                "optional": {"incoming_score_abc": ("STRING", {"forceInput": True, "tooltip": "Load ABC from Compose, a STRING node, or an LLM (PROMPT_GENERATION_WITH_ABC.md). Edits persist until the upstream score changes."}),
                              "source_score_hash": ("STRING", {"default": ""})}}
 
     def score(self, score_abc, incoming_score_abc=None, source_score_hash=""):
