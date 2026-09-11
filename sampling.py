@@ -1,6 +1,7 @@
 """Request-local sampling, preserving mode-specific historical arithmetic."""
 from __future__ import annotations
 import time
+from collections import Counter
 import torch
 from .model import StaticKVCache
 from .protocol import EOD, ABC_END, MUSIC_END, CODEC_OFFSET, CODEC_SIZE, CONTEXT
@@ -24,7 +25,8 @@ def window_penalty(logits, recent_ids, penalty):
     return torch.where(logits < 0, logits * alpha, logits / alpha)
 
 
-def distribution(logits, sampling, history, step, phase, legacy_off=False):
+def distribution(logits, sampling, history, step, phase, legacy_off=False,
+                 penalty_scale=1.0, ban_ids=None):
     # vLLM's symbolic processor receives FP32 logits; historical off uses BF16.
     scores = logits.clone() if legacy_off else logits.float().clone()
     end = ABC_END if phase == "abc" else MUSIC_END
@@ -37,7 +39,11 @@ def distribution(logits, sampling, history, step, phase, legacy_off=False):
     scores = scores + allowed
     if step < sampling.min_tokens:
         scores[..., end] = -torch.inf
-    scores = window_penalty(scores, history[-sampling.penalty_window:], sampling.repetition_penalty)
+    penalty = float(sampling.repetition_penalty) * float(penalty_scale)
+    scores = window_penalty(scores, history[-sampling.penalty_window:], penalty)
+    if ban_ids:
+        banned = torch.as_tensor(list(ban_ids), dtype=torch.long, device=scores.device)
+        scores[..., banned] = -torch.inf
     if sampling.temperature == 0:
         return scores
     if sampling.temperature != 1:
@@ -97,7 +103,19 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
                 raise InterruptedError(f"Cancelled during {phase}")
             # Preserve historical BF16 CFG subtraction/multiply/add before upcast.
             logits = conditional if cfg_scale == 1.0 else unconditional + cfg_scale * (conditional - unconditional)
-            scores = distribution(logits, sampling, history, step, phase, legacy_off)
+            # Anti-collapse: long semantic runs can lock into a tiny codec cycle (silent audio).
+            penalty_scale, ban_ids = 1.0, None
+            if phase == "semantic" and len(history) >= sampling.penalty_window:
+                window = history[-sampling.penalty_window:]
+                uniq = len(set(window))
+                if uniq <= 8:
+                    penalty_scale = 1.6
+                    # Ban the most frequent recent IDs so the cycle must break.
+                    ban_ids = [token for token, _ in Counter(window).most_common(3)]
+                elif uniq <= 16:
+                    penalty_scale = 1.3
+            scores = distribution(logits, sampling, history, step, phase, legacy_off,
+                                  penalty_scale=penalty_scale, ban_ids=ban_ids)
             if sampling.temperature == 0:
                 next_id = scores.argmax(-1, keepdim=True)
             else:

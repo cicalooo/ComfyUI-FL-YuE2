@@ -220,6 +220,10 @@ def render(music, plan, max_seconds, temperature, top_p, top_k, repetition_penal
     steps, preset = resolve_speed_preset(speed_preset, steps)
     max_tokens = round(max_seconds * 25)
     min_tokens = min(200, max_tokens)
+    # Upstream direct mode defaults to 1.01; node widget default is 1.0.
+    if plan.request.cot == "off" and abs(float(cfg_scale) - 1.0) < 1e-9:
+        cfg_scale = float(plan.request.guidance)
+        logging.info("YuE2: planning=off using guidance=%.2f (upstream direct-mode default)", cfg_scale)
     if plan.score_seconds is not None and plan.score_seconds + 5 < max_seconds * 0.5:
         logging.warning(
             "YuE2: score musical length ~%.1fs is much shorter than max_duration=%ds — output often ends near the score length. "
@@ -255,10 +259,13 @@ def render(music, plan, max_seconds, temperature, top_p, top_k, repetition_penal
         timing.get("content_tokens", len(ids)), unique, min(codec), max(codec),
         audio_seconds, timing.get("seconds", 0.0), timing.get("output_tps", 0.0), steps, preset,
     )
-    if unique < 8:
-        logging.warning(
-            "YuE2: only %d unique codec tokens — output may be silent or degenerate. Try another seed or planning=off.",
-            unique,
+    min_unique = max(32, len(codec) // 80)
+    if unique < min_unique:
+        raise ValueError(
+            "YuE2 semantic generation collapsed (%d unique codec ids / %d tokens). "
+            "Near-silent audio would result. Try: change seed, set planning=off with guidance>=1.01, "
+            "raise repetition_penalty to ~1.35, shorten max_duration, or paste a validated Score ABC."
+            % (unique, len(codec))
         )
     latent = synthesize(model, plan.prefix, codec, plan.request.seed,
                         steps=steps, cancelled=cancelled, on_progress=acoustic_progress(steps))
