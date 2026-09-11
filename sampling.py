@@ -17,41 +17,26 @@ def synchronize(device, enabled=True):
 
 
 def window_penalty(logits, recent_ids, penalty):
-    """Apply repetition penalty only to IDs seen in the window (no full-vocab buffer)."""
     if penalty == 1.0 or len(recent_ids) == 0:
         return logits
-    recent = torch.as_tensor(recent_ids, dtype=torch.long, device=logits.device)
-    unique, counts = torch.unique(recent, return_counts=True)
-    scores = logits.clone()
-    selected = scores.index_select(-1, unique)
-    alpha = penalty ** counts.to(dtype=selected.dtype)
-    scores[..., unique] = torch.where(selected < 0, selected * alpha, selected / alpha)
-    return scores
-
-
-def _mask_disallowed(scores, phase, end):
-    """In-place: keep only the native allowed band plus the phase end token.
-
-    Semantic note: MUSIC_END (end) is *before* CODEC_OFFSET, so we must not wipe
-    ``end+1:`` or the entire codec band is destroyed.
-    """
-    end_logit = scores[..., end].clone()
-    if phase == "abc":
-        # Allow ordinary text tokens [0, EOD) plus ABC_END.
-        scores[..., EOD:] = float("-inf")
-    else:
-        # Allow codec IDs plus MUSIC_END.
-        scores[..., :CODEC_OFFSET] = float("-inf")
-        scores[..., CODEC_OFFSET + CODEC_SIZE:] = float("-inf")
-    scores[..., end] = end_logit
-    return scores
+    recent = torch.as_tensor(recent_ids, dtype=torch.long, device=logits.device).reshape(1, -1)
+    freq = torch.zeros_like(logits)
+    freq.scatter_add_(-1, recent, torch.ones_like(recent, dtype=logits.dtype))
+    alpha = penalty ** freq
+    return torch.where(logits < 0, logits * alpha, logits / alpha)
 
 
 def distribution(logits, sampling, history, step, phase, legacy_off=False):
     # vLLM's symbolic processor receives FP32 logits; historical off uses BF16.
     scores = logits.clone() if legacy_off else logits.float().clone()
     end = ABC_END if phase == "abc" else MUSIC_END
-    _mask_disallowed(scores, phase, end)
+    allowed = torch.full_like(scores, float("-inf"))
+    if phase == "abc":
+        allowed[..., :EOD] = 0
+    else:
+        allowed[..., CODEC_OFFSET:CODEC_OFFSET + CODEC_SIZE] = 0
+    allowed[..., end] = 0
+    scores = scores + allowed
     if step < sampling.min_tokens:
         scores[..., end] = -torch.inf
     scores = window_penalty(scores, history[-sampling.penalty_window:], sampling.repetition_penalty)
@@ -67,20 +52,9 @@ def distribution(logits, sampling, history, step, phase, legacy_off=False):
         removed = probabilities.cumsum(-1) - probabilities > sampling.top_p
         removed[..., :3 if legacy_off else 1] = False
         values = values.masked_fill(removed, -torch.inf)
-        scores = torch.full_like(scores, float("-inf")).scatter(-1, indices, values)
+        # indices is a full permutation from sort; scatter rebuilds unsorted scores.
+        scores = values.scatter(-1, indices, values)
     return scores
-
-
-def _sample_token(scores, sampling, generator, device):
-    if sampling.temperature == 0:
-        return scores.argmax(-1, keepdim=True)
-    probabilities = scores.softmax(-1)
-    # Guard against all-masked / non-finite distributions (would abort CUDA multinomial).
-    if not torch.isfinite(probabilities).all() or float(probabilities.sum()) <= 0:
-        return scores.argmax(-1, keepdim=True)
-    if device.type == "mps":
-        return torch.multinomial(probabilities.cpu(), 1, generator=generator).to(device)
-    return torch.multinomial(probabilities, 1, generator=generator)
 
 
 def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_scale=1.0,
@@ -138,7 +112,14 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
             # Preserve historical BF16 CFG subtraction/multiply/add before upcast.
             logits = conditional if cfg_scale == 1.0 else unconditional + cfg_scale * (conditional - unconditional)
             scores = distribution(logits, sampling, history, step, phase, legacy_off)
-            next_id = _sample_token(scores, sampling, generator, device)
+            if sampling.temperature == 0:
+                next_id = scores.argmax(-1, keepdim=True)
+            else:
+                probabilities = scores.softmax(-1)
+                if device.type == "mps":
+                    next_id = torch.multinomial(probabilities.cpu(), 1, generator=generator).to(device)
+                else:
+                    next_id = torch.multinomial(probabilities, 1, generator=generator)
             token = int(next_id.item())
             if first is None:
                 first = time.perf_counter() - start
@@ -169,4 +150,3 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
         return history, timing, not eos
     finally:
         positive_cache = negative_cache = None
-

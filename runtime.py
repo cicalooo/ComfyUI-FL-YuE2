@@ -221,7 +221,7 @@ def render(music, plan, max_seconds, temperature, top_p, top_k, repetition_penal
     max_tokens = round(max_seconds * 25)
     # Scale the EOS floor with max_duration so long renders cannot stop at the old ~8s (200 tok) floor.
     # Cap at 2000 tok (~80s) so short max_duration jobs stay responsive.
-    min_tokens = min(max_tokens, max(200, min(2000, round(max_seconds * 10))))
+    min_tokens = min(200, max_tokens)  # upstream floor; do not scale with duration
     if plan.score_seconds is not None and plan.score_seconds + 5 < max_seconds * 0.5:
         logging.warning(
             "YuE2: score musical length ~%.1fs is much shorter than max_duration=%ds — output often ends near the score length. "
