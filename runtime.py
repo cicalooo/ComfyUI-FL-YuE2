@@ -219,9 +219,7 @@ def render(music, plan, max_seconds, temperature, top_p, top_k, repetition_penal
         raise ValueError("YuE2 plan changed. Submit edited ABC through the Plan node.")
     steps, preset = resolve_speed_preset(speed_preset, steps)
     max_tokens = round(max_seconds * 25)
-    # Scale the EOS floor with max_duration so long renders cannot stop at the old ~8s (200 tok) floor.
-    # Cap at 2000 tok (~80s) so short max_duration jobs stay responsive.
-    min_tokens = min(200, max_tokens)  # upstream floor; do not scale with duration
+    min_tokens = min(200, max_tokens)
     if plan.score_seconds is not None and plan.score_seconds + 5 < max_seconds * 0.5:
         logging.warning(
             "YuE2: score musical length ~%.1fs is much shorter than max_duration=%ds — output often ends near the score length. "
@@ -247,13 +245,27 @@ def render(music, plan, max_seconds, temperature, top_p, top_k, repetition_penal
     if truncated:
         logging.warning("YuE2 reached max_duration; increase it if the song ends early.")
     audio_seconds = len(ids) / 25.0
+    codec = [token - CODEC_OFFSET for token in ids]
+    if any(token < 0 or token >= CODEC_SIZE for token in codec):
+        raise ValueError("YuE2 produced semantic IDs outside the codec band")
+    unique = len(set(codec))
     logging.info(
-        "YuE2: semantic done (%d tokens, ~%.1fs audio, %.1fs wall, %.1f tok/s); starting acoustic synthesis (%d steps, preset=%s)",
-        timing.get("content_tokens", len(ids)), audio_seconds, timing.get("seconds", 0.0), timing.get("output_tps", 0.0), steps, preset,
+        "YuE2: semantic done (%d tokens, %d unique codec ids, range %d-%d, ~%.1fs audio, %.1fs wall, %.1f tok/s); "
+        "starting acoustic synthesis (%d steps, preset=%s)",
+        timing.get("content_tokens", len(ids)), unique, min(codec), max(codec),
+        audio_seconds, timing.get("seconds", 0.0), timing.get("output_tps", 0.0), steps, preset,
     )
-    latent = synthesize(model, plan.prefix, [token - CODEC_OFFSET for token in ids], plan.request.seed,
+    if unique < 8:
+        logging.warning(
+            "YuE2: only %d unique codec tokens — output may be silent or degenerate. Try another seed or planning=off.",
+            unique,
+        )
+    latent = synthesize(model, plan.prefix, codec, plan.request.seed,
                         steps=steps, cancelled=cancelled, on_progress=acoustic_progress(steps))
-    logging.info("YuE2: acoustic latents ready shape=%s", tuple(latent.shape))
+    logging.info(
+        "YuE2: acoustic latents ready shape=%s |mean|=%.5f |max|=%.5f",
+        tuple(latent.shape), float(latent.abs().mean()), float(latent.abs().max()),
+    )
     timing = {**timing, "acoustic_steps": steps, "speed_preset": preset, "audio_seconds": audio_seconds}
     # The runtime owns YuE2's native [B,C,T] layout.
     return latent.T.unsqueeze(0).contiguous(), truncated, timing
@@ -263,21 +275,32 @@ def decode(vae, latent, tile_frames):
     if latent.ndim != 3 or latent.shape[1] != 64 or latent.shape[-1] == 0:
         raise ValueError("Expected YuE2 latents shaped [batch,64,frames]")
     tiles = (latent.shape[-1] + tile_frames - 1) // tile_frames
-    logging.info("YuE2: decoding audio (%d frames, tile_frames=%d, %d tile(s))", latent.shape[-1], tile_frames, tiles)
+    logging.info(
+        "YuE2: decoding audio (%d frames, tile_frames=%d, %d tile(s), latent |mean|=%.5f |max|=%.5f)",
+        latent.shape[-1], tile_frames, tiles, float(latent.detach().abs().mean()), float(latent.detach().abs().max()),
+    )
+    if float(latent.detach().abs().max()) < 1e-4:
+        raise ValueError(
+            "YuE2 acoustic latents are near-zero (silent). Try planning=off, a different seed, "
+            "or paste a validated Score ABC in Piano Roll — auto-composed short scores sometimes yield empty audio."
+        )
     mm.load_models_gpu([vae], memory_required=2 * 1024**3, force_full_load=True)
     bar = ProgressBar(tiles)
     started = time.perf_counter()
-    last_log = [started]
-
-    def on_tile(completed, total=tiles):
-        bar.update_absolute(completed)
-        now = time.perf_counter()
-        if completed == 1 or completed >= total or now - last_log[0] >= 1.0:
-            logging.info("YuE2: decode tile %d / %d (%.1f%%)", completed, total, 100.0 * completed / max(total, 1))
-            last_log[0] = now
-
-    audio = vae.model.decode_tiled(latent, tile_frames, on_tile)
+    audio = vae.model.decode_tiled(latent, tile_frames, bar.update_absolute)
     if not torch.isfinite(audio).all():
         raise ValueError("YuE2 produced non-finite audio")
-    logging.info("YuE2: decode complete in %.1fs (sample_rate=%s)", time.perf_counter() - started, vae.model.sample_rate)
+    peak = float(audio.detach().abs().max())
+    rms = float(audio.detach().pow(2).mean().sqrt())
+    logging.info(
+        "YuE2: decode complete in %.1fs (sample_rate=%s, peak=%.4f, rms=%.6f)",
+        time.perf_counter() - started, vae.model.sample_rate, peak, rms,
+    )
+    if peak < 0.01:
+        raise ValueError(
+            "YuE2 decoded near-silent audio (peak=%.4f). This often happens with auto-composed ABC "
+            "and no pasted score. Retry with planning=off, another seed, shorter max_duration (e.g. 60), "
+            "or supply Score ABC via Piano Roll / the no-JSON prompt for lyrics+style only."
+            % peak
+        )
     return {"waveform": audio.clamp_(-1, 1), "sample_rate": vae.model.sample_rate}
