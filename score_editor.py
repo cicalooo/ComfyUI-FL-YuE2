@@ -5,7 +5,7 @@ import hashlib
 from aiohttp import web
 from server import PromptServer
 
-from .abc_score import AbcError, KEYS, QUALITIES, DURATIONS, CHORD, parse, meter_value
+from .abc_score import AbcError, KEYS, QUALITIES, DURATIONS, CHORD, parse, meter_value, normalize_native_abc
 
 
 DEFAULT_SCORE = '''X:1
@@ -32,7 +32,9 @@ F2A2c4A2G2F4|D2F2A4G2F2D4|E2^G2B4A2G2E4|A8z8|
 def inspect_score(text):
     if not isinstance(text, str) or len(text) > 200_000:
         raise AbcError("Supply ABC text of at most 200,000 characters.")
-    text = text.replace("\r\n", "\n").strip() + "\n"
+    text = normalize_native_abc(text)
+    if not text.strip():
+        raise AbcError("Supply ABC text of at most 200,000 characters.")
     score = parse(text)
     lines = text.splitlines()
     sections = []

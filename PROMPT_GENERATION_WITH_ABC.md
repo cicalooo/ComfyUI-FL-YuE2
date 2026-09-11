@@ -47,11 +47,24 @@ Then sections as comment labels:
 % chorus
 (use short lowercase names like verse, chorus, bridge, intro, outro)
 
-For each section, write music in blocks of at most 4 bars per voice line:
+For each section, write music in **strict pairs**. Every group is exactly:
+
+% sectionname
 V: Vocal
-...bars separated by | ending with |
+<1-4 measures joined by | and ending with |>
 V: Ins
-...bars separated by | ending with |
+<1-4 measures joined by | and ending with |>
+
+Hard requirements (this is what triggers `group N, Ins: expected V: Ins`):
+- After each Vocal music line, the next music line MUST be preceded by the exact tag `V: Ins` (space after the colon).
+- Never omit `V: Ins`. Never write `V:Ins`, `V: Instrumental`, `V: Inst`, or `V: Melody`.
+- Never put a `% section` comment between Vocal and Ins — only before `V: Vocal`.
+- Never output two Vocal blocks back-to-back without Ins between them.
+- Never put Ins music immediately under Vocal without the `V: Ins` tag.
+- Header voice definitions must be exactly these two lines (copy verbatim):
+  V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
+  V: Ins clef=treble name="Ins Melody" snm="Inst."
+
 
 Rules:
 - Exactly two voices: Vocal and Ins. Monophonic each (no overlapping notes in a voice).

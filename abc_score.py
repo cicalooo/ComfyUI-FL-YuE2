@@ -13,6 +13,127 @@ from fractions import Fraction
 
 
 VOICES = ("Vocal", "Ins")
+
+
+HEADER_VOCAL = 'V: Vocal clef=treble name="Vocal Melody" snm="Vocal"'
+HEADER_INS = 'V: Ins clef=treble name="Ins Melody" snm="Inst."'
+_INS_ALIASES = {
+    "ins", "inst", "inst.", "instrumental", "instrument", "instruments",
+    "melody", "lead", "accompaniment", "acc",
+}
+
+
+def _normalize_voice_line(line: str) -> str:
+    """Map common LLM voice spellings onto the two native V: tags / headers."""
+    match = re.match(r"^V:\s*(.+?)\s*$", line)
+    if match is None:
+        return line
+    body = match.group(1).strip()
+    lower = body.lower()
+    if lower.startswith("vocal clef=") or lower == HEADER_VOCAL.lower():
+        return HEADER_VOCAL
+    if "clef=" in lower and (
+        lower.startswith("ins ")
+        or lower.startswith("inst")
+        or "ins melody" in lower
+        or "inst." in lower
+        or lower.startswith("instrument")
+    ):
+        return HEADER_INS
+    if lower == "vocal":
+        return "V: Vocal"
+    # Bare voice switch aliases for the instrumental voice.
+    token = lower.split()[0].rstrip(".")
+    if lower in _INS_ALIASES or token in _INS_ALIASES:
+        return "V: Ins"
+    return f"V: {body}"
+
+
+def normalize_native_abc(text: str) -> str:
+    """Repair frequent LLM layout mistakes before the strict native parse.
+
+    - Normalize newlines / trim blank lines
+    - Fix V:Ins / V: Instrumental style aliases
+    - Insert a missing ``V: Ins`` when a music line follows Vocal music directly
+    - Drop section comments that were placed between Vocal and Ins in a group
+    """
+    if not isinstance(text, str):
+        return text
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "").strip()
+    # Prefer a fenced ```abc block if the model wrapped the score.
+    fenced = re.search(r"```(?:abc)?\s*\n([\s\S]*?)```", text, re.IGNORECASE)
+    if fenced and re.search(r"(?m)^X:\s*1\s*$", fenced.group(1)):
+        text = fenced.group(1).strip()
+    labeled = re.search(
+        r"###\s*SCORE_ABC\s*\n([\s\S]*?)(?=\n###\s+[A-Z]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    if labeled and re.search(r"(?m)^X:\s*1\s*$", labeled.group(1)):
+        text = labeled.group(1).strip()
+    raw_lines = [_normalize_voice_line(line.strip()) for line in text.splitlines()]
+    lines = [line for line in raw_lines if line]
+    if len(lines) < 8:
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    header, body = lines[:8], lines[8:]
+    # Soft-fix exact header voice definitions when close.
+    if len(header) >= 7:
+        if header[5].startswith("V:") and header[5] != HEADER_VOCAL:
+            if "vocal" in header[5].lower():
+                header[5] = HEADER_VOCAL
+        if header[6].startswith("V:") and header[6] != HEADER_INS:
+            if any(token in header[6].lower() for token in ("ins", "inst", "instrument")):
+                header[6] = HEADER_INS
+
+    repaired: list[str] = []
+    i = 0
+    while i < len(body):
+        line = body[i]
+        if line.startswith("%"):
+            # Force "% name" form.
+            if line.startswith("% "):
+                repaired.append(line)
+            else:
+                repaired.append("% " + line[1:].lstrip())
+            i += 1
+            continue
+        if line == "V: Vocal":
+            repaired.append(line)
+            i += 1
+            while i < len(body) and body[i].startswith(("M:", "K:")):
+                repaired.append(body[i])
+                i += 1
+            if i < len(body) and body[i].endswith("|") and not body[i].startswith("V:"):
+                repaired.append(body[i])
+                i += 1
+            # Section comments illegally sitting between Vocal and Ins → skip for now.
+            while i < len(body) and body[i].startswith("%"):
+                i += 1
+            if i < len(body) and body[i] == "V: Ins":
+                repaired.append(body[i])
+                i += 1
+            elif i < len(body) and body[i].endswith("|") and not body[i].startswith("V:"):
+                repaired.append("V: Ins")
+            elif i < len(body) and body[i].startswith("V:"):
+                # Unknown V: tag after Vocal music — coerce instrumental aliases only.
+                repaired.append("V: Ins")
+                i += 1
+            else:
+                # Let the strict parser report a clear missing-music error.
+                repaired.append("V: Ins")
+            while i < len(body) and body[i].startswith(("M:", "K:")):
+                repaired.append(body[i])
+                i += 1
+            if i < len(body) and body[i].endswith("|") and not body[i].startswith(("V:", "%")):
+                repaired.append(body[i])
+                i += 1
+            continue
+        repaired.append(line)
+        i += 1
+
+    return "\n".join(header + repaired) + "\n"
+
 DURATIONS = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48}
 QUALITIES = ("", "m", "dim", "aug", "7", "maj7", "m7", "dim7", "m7b5",
              "sus4", "sus2", "6", "m6", "7sus4", "m(maj7)")
