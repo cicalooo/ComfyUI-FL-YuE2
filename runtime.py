@@ -13,7 +13,7 @@ from .downloads import resolve
 from .model import YuE2Model
 from .vae import YuE2VAE
 from .tokenizer import YuE2TextTokenizer
-from .protocol import SongRequest, GenerationConfig, token_prefixes, negative_prefix, CODEC_OFFSET, resolve_sampling
+from .protocol import SongRequest, GenerationConfig, token_prefixes, negative_prefix, CODEC_OFFSET, CODEC_SIZE, resolve_sampling
 from .sampling import generate_tokens
 from .nar import synthesize
 from .abc_score import normalize_native_abc, parse as parse_abc, AbcError
