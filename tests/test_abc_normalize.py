@@ -52,3 +52,42 @@ def test_drops_comment_between_voices():
     fixed = abc_score.normalize_native_abc(raw)
     assert "% between" not in fixed
     abc_score.parse(fixed)
+
+
+def test_halves_double_length_bars():
+    raw = """X:1
+T:
+M:4/4
+L:1/16
+Q:1/4=90
+V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
+V: Ins clef=treble name="Ins Melody" snm="Inst."
+K:C
+% verse
+V: Vocal
+"C"z16|"G"z16|"Am"z16|"F"z16|
+V: Ins
+C8D8E8F8|G8A8B8c8|A8G8F8E8|D8C8B,8C8|
+"""
+    fixed = abc_score.normalize_native_abc(raw)
+    assert "C4D4E4F4|" in fixed
+    abc_score.parse(fixed)
+
+
+def test_pads_short_bars():
+    raw = """X:1
+T:
+M:4/4
+L:1/16
+Q:1/4=90
+V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
+V: Ins clef=treble name="Ins Melody" snm="Inst."
+K:C
+% verse
+V: Vocal
+"C"z8|
+V: Ins
+C4D4|
+"""
+    fixed = abc_score.normalize_native_abc(raw)
+    abc_score.parse(fixed)

@@ -70,6 +70,7 @@ Rules:
 - Exactly two voices: Vocal and Ins. Monophonic each (no overlapping notes in a voice).
 - Chord symbols only on the Vocal voice, in quotes before events, e.g. "Am7" "Cmaj7"
 - Supported chord qualities: (empty major), m, dim, aug, 7, maj7, m7, dim7, m7b5, sus4, sus2, 6, m6, 7sus4, m(maj7), optional /bass with pitch name
+- **Every measure must fill the meter exactly in L: units.** With `M:4/4` and `L:1/16`, each bar's note/rest durations must sum to **16** (e.g. `z16`, `C4D4E4F4`, `E2A2c4B2A2G4`). Sums of 32 (like `C8D8E8F8`) overflow and fail validation.
 - Notes: A–G / a–g with optional accidentals ^ _ = ^^ __, octave marks , or ', duration integers from {1,2,3,4,6,8,12,16,24,32,48}, optional tie -
 - Rests: z with a supported duration (no accidentals/octave/tie on rests)
 - No lyrics in the ABC, no MIDI, no guitar tabs, no multiple tunes, no mid-tune M: changes unless necessary (key/meter mid-song forces Advanced-only editing)

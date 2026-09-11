@@ -56,6 +56,7 @@ def normalize_native_abc(text: str) -> str:
     - Fix V:Ins / V: Instrumental style aliases
     - Insert a missing ``V: Ins`` when a music line follows Vocal music directly
     - Drop section comments that were placed between Vocal and Ins in a group
+    - Fit each measure to M:/L: (halve/double common LLM grids; trim/pad overflows)
     """
     if not isinstance(text, str):
         return text
@@ -132,6 +133,7 @@ def normalize_native_abc(text: str) -> str:
         repaired.append(line)
         i += 1
 
+    repaired = _repair_score_durations(header, repaired)
     return "\n".join(header + repaired) + "\n"
 
 DURATIONS = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48}
@@ -145,6 +147,156 @@ TOKEN = re.compile(
     r"(?P<acc>\^\^|__|\^|_|=)?(?P<note>[A-Ga-gz])"
     r"(?P<oct>[,']*)(?P<duration>[0-9]*)(?P<tie>-?)"
 )
+
+
+def _units_per_bar(meter_field: str, length_field: str) -> int | None:
+    """L-unit count that must fill one measure (e.g. M:4/4 + L:1/16 -> 16)."""
+    meter = re.fullmatch(r"M:([1-9][0-9]*)/([1-9][0-9]*)", meter_field)
+    length = re.fullmatch(r"L:1/([1-9][0-9]*)", length_field)
+    if meter is None or length is None:
+        return None
+    n, d = int(meter.group(1)), int(meter.group(2))
+    denom = int(length.group(1))
+    if d == 0 or (n * denom) % d != 0:
+        return None
+    return (n * denom) // d
+
+
+def _rewrite_duration(token: str, new_dur: int) -> str:
+    match = TOKEN.match(token)
+    if match is None or match.group("note") is None:
+        return token
+    prefix = token[: match.start("duration")]
+    # TOKEN duration group may be empty; end before tie.
+    tie = match.group("tie") or ""
+    body = match.group("note")
+    # Rebuild from structured groups to avoid slicing hazards.
+    acc = match.group("acc") or ""
+    octv = match.group("oct") or ""
+    dur = "" if new_dur == 1 else str(new_dur)
+    return f"{acc}{body}{octv}{dur}{tie}"
+
+
+def _split_rests(units: int) -> list[str] | None:
+    if units < 0:
+        return None
+    if units == 0:
+        return []
+    parts: list[str] = []
+    remaining = units
+    for length in sorted(DURATIONS, reverse=True):
+        while remaining >= length:
+            remaining -= length
+            parts.append("z" if length == 1 else f"z{length}")
+    return None if remaining else parts
+
+
+def _bar_note_items(bar: str):
+    """Return list of (kind, token, duration_units) or None if untokenizable."""
+    if bar == "Z" or re.fullmatch(r"Z[2-4]", bar):
+        return [("full", bar, None)]
+    cursor = 0
+    items = []
+    while cursor < len(bar):
+        if bar[cursor].isspace():
+            cursor += 1
+            continue
+        match = TOKEN.match(bar, cursor)
+        if match is None:
+            return None
+        token = match.group(0)
+        cursor = match.end()
+        if match.group("chord") is not None or match.group("key") is not None:
+            items.append(("meta", token, 0))
+            continue
+        dur = int(match.group("duration") or "1")
+        items.append(("note", token, dur))
+    return items
+
+
+def _repair_bar(bar: str, target: int) -> str:
+    bar = bar.strip()
+    if not bar:
+        return bar
+    items = _bar_note_items(bar)
+    if items is None:
+        return bar
+    if items and items[0][0] == "full":
+        return bar
+    total = sum(dur for kind, _, dur in items if kind == "note")
+    if total == target:
+        return "".join(token for _, token, _ in items)
+
+    # Common LLM mistake: durations written at 2x or 1/2x the L: grid.
+    if total == 2 * target and all(dur % 2 == 0 for kind, _, dur in items if kind == "note"):
+        return "".join(
+            _rewrite_duration(token, dur // 2) if kind == "note" else token
+            for kind, token, dur in items
+        )
+    if total * 2 == target and all((dur * 2) in DURATIONS for kind, _, dur in items if kind == "note"):
+        return "".join(
+            _rewrite_duration(token, dur * 2) if kind == "note" else token
+            for kind, token, dur in items
+        )
+
+    if total > target:
+        out: list[str] = []
+        used = 0
+        for kind, token, dur in items:
+            if kind != "note":
+                out.append(token)
+                continue
+            if used >= target:
+                break
+            if used + dur <= target:
+                out.append(token)
+                used += dur
+                continue
+            need = target - used
+            if need in DURATIONS:
+                out.append(_rewrite_duration(token, need))
+                used = target
+            break
+        if used < target:
+            rests = _split_rests(target - used)
+            if rests is None:
+                return bar
+            out.extend(rests)
+        return "".join(out)
+
+    rests = _split_rests(target - total)
+    if rests is None:
+        return bar
+    return "".join(token for _, token, _ in items) + "".join(rests)
+
+
+def _repair_music_line(line: str, target: int) -> str:
+    if target is None or not line.endswith("|"):
+        return line
+    bars = line[:-1].split("|")
+    fixed = []
+    for bar in bars:
+        if bar.strip() == "" and not fixed:
+            continue
+        fixed.append(_repair_bar(bar, target))
+    # Preserve trailing barline; drop accidental empty leading pieces.
+    return "|".join(fixed) + "|"
+
+
+def _repair_score_durations(header: list[str], body: list[str]) -> list[str]:
+    if len(header) < 4:
+        return body
+    target = _units_per_bar(header[2], header[3])
+    if target is None:
+        return body
+    out = []
+    for line in body:
+        if line.endswith("|") and not line.startswith(("V:", "%", "M:", "K:", "w:")):
+            out.append(_repair_music_line(line, target))
+        else:
+            out.append(line)
+    return out
+
 NATURAL = dict(zip("CDEFGAB", (0, 2, 4, 5, 7, 9, 11)))
 KEYS = {
     **dict(zip(("Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#"), range(-7, 8))),
