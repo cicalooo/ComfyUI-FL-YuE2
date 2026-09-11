@@ -1,5 +1,7 @@
 # YuE2 Prompt Generation (no JSON)
 
+> **Reliability note:** This **no-JSON** labeled-segment prompt is the **dependable** path for core Compose fields (`style`, `lyrics`, `planning`). Prefer it when you need consistent song details. Optional score ABC generation ([`PROMPT_GENERATION_WITH_ABC.md`](PROMPT_GENERATION_WITH_ABC.md)) remains experimental / hit-or-miss.
+
 For style + lyrics + a matching YuE2 ABC score, see `PROMPT_GENERATION_WITH_ABC.md`.
 
 Copy-paste system prompt for ChatGPT, Claude, or similar. Output is **plain labeled segments** — no JSON — ready to paste into **FL YuE2 Compose**.

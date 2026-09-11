@@ -79,6 +79,7 @@ Interaction choices follow the navigation, drawing, preview and editing patterns
 
 
 ## Speed and length tips
+- **LLM prompts:** [`PROMPT_GENERATION_NO_JSON.md`](PROMPT_GENERATION_NO_JSON.md) is the dependable way to get Compose `style` / `lyrics` / `planning`. [`PROMPT_GENERATION_WITH_ABC.md`](PROMPT_GENERATION_WITH_ABC.md) can also emit Score ABC, but that ABC path is still **hit-or-miss** — validate in Piano Roll and do not fully rely on it.
 
 - **AR token generation dominates runtime.** Shorter `max_duration`, supplied ABC (skip score AR), and `guidance=1.0` are the biggest wins. `guidance≠1` runs two branches (~2× AR cost).
 - **Render `speed_preset`:** `fast` (16 acoustic steps), `balanced` (24), `quality` (32), or `custom` with your own `acoustic_steps`.

@@ -1,5 +1,7 @@
 # YuE2 Prompt Generation (with score ABC)
 
+> **Reliability note:** LLM-generated **Score ABC** is still **hit-or-miss**. Dialect repairs help common failures, but bars, duration fills, and musical quality are not reliable enough to depend on for production. Treat SCORE_ABC as an optional sketch — always validate in Piano Roll and expect to edit or regenerate. For dependable core song fields (`style` / `lyrics` / `planning`), use [`PROMPT_GENERATION_NO_JSON.md`](PROMPT_GENERATION_NO_JSON.md) instead.
+
 Third prompt pack: same plain labeled segments as `PROMPT_GENERATION_NO_JSON.md`, plus a **matching YuE2-native ABC score**.
 
 Use with a capable chat model (Qwen-class ~14B–32B, Claude, GPT, etc.). A ~27B model can produce short, dialect-locked ABC that lines up with style/lyrics; always validate in **FL YuE2 Piano Roll** (Paste ABC / Import ABC / `incoming_score_abc`) before rendering.
