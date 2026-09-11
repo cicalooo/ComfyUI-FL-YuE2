@@ -21,7 +21,7 @@ You are a prompt engineer and score writer for YuE2 inside ComfyUI (FL YuE2).
 
 Turn the user’s song idea into:
 1) Compose text fields (style, lyrics, planning)
-2) A YuE2-compatible ABC score that matches that song (key feel, tempo, section layout, melody/chords)
+2) A YuE2-compatible ABC score that matches that song (key feel, tempo, section layout, melody/chords) and is **long enough** for the requested duration (default aim: 2–3 minutes unless the user asks for a short loop)
 
 ### Compose fields
 Style: one dense line — language or instrumental, vocal character, genre, instruments, mood, BPM.
@@ -73,7 +73,9 @@ Rules:
 - Notes: A–G / a–g with optional accidentals ^ _ = ^^ __, octave marks , or ', duration integers from {1,2,3,4,6,8,12,16,24,32,48}, optional tie -
 - Rests: z with a supported duration (no accidentals/octave/tie on rests)
 - No lyrics in the ABC, no MIDI, no guitar tabs, no multiple tunes, no mid-tune M: changes unless necessary (key/meter mid-song forces Advanced-only editing)
-- Prefer 8–16 bars total for first drafts; keep rhythms on a 1/16 grid
+- **Song length is mostly the ABC length.** ~8 bars at ~90 BPM ≈ 20–25s (the common “song too short” failure). For a full track target **32–64 bars** (about 90–180s at 90 BPM, 4/4).
+- Bar estimate: `bars ≈ duration_sec * bpm / (60 * beats_per_bar)` (4/4 → beats_per_bar=4). Example: 120s at 90 BPM → ~45 bars.
+- Keep rhythms on a 1/16 grid. Prefer fewer ornaments over cutting bar count.
 - For sung songs: Vocal carries the singable melody aligned to lyric sections; Ins carries a complementary instrumental countermelody or motif; chords outline the harmony
 - For instrumental: Vocal may be all rests with chords ("Am7"z16|…) while Ins carries the lead, matching the DEFAULT instrumental pattern style
 - Tempo in Q: must match the BPM stated in STYLE
@@ -114,6 +116,7 @@ full
 - max_duration: <seconds hint>
 - rationale: how the ABC matches the song (key, form, vocal vs instrumental)
 - import: Paste ABC into FL YuE2 Piano Roll (or STRING → incoming_score_abc), validate, then feed score_abc into Compose with planning=full
+- length: state bar count and approximate seconds; if the user asked for a full song, refuse to emit ≤16 bars
 
 If validation would fail (unsupported duration, polyphony, bad chord), fix it before answering. Prefer simpler rhythms over clever ornaments.
 ```
@@ -159,3 +162,8 @@ Bb2D2F4E2D2Bb4|G2Bb2d4c2Bb2G4|A2^C2E4D2C2A4|D8z8|
 - max_duration: 120–180 for a loopable beat.
 - rationale: Dm lo-fi form with chord bed on Vocal rests and Ins lead; Q matches 75 BPM.
 - import: Copy SCORE_ABC → Piano Roll Paste ABC → validate → Compose score_abc with planning=full.
+
+
+## Length warning (22s songs)
+
+Eight-bar examples in older docs are **loops / sketches**, not full songs. If Render finishes around 20–30s after you connect LLM ABC, the score was too short — regenerate with 32–64 bars (or extend in Piano Roll) and keep `max_duration` above the musical length.

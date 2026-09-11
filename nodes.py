@@ -41,7 +41,17 @@ class FL_YuE2_Plan:
 
     def plan(self, music_model, style, lyrics, planning, seed, max_score_tokens, score_abc=""):
         result = runtime.make_plan(music_model, style, lyrics, seed, planning, score_abc, max_score_tokens)
-        return {"ui": {"text": [result.abc or "Direct generation — no symbolic score."]}, "result": (result, result.abc or "")}
+        if result.abc and result.score_seconds is not None:
+            message = f"{result.score_bars} bars · ~{result.score_seconds:.1f}s musical length\n{result.abc}"
+            if result.score_seconds < 45:
+                message = (
+                    f"Short score (~{result.score_seconds:.0f}s / {result.score_bars} bars). "
+                    "LLM 8-bar drafts often render ~20–30s audio — aim for 32–64 bars for 2–3 minutes.\n"
+                    + result.abc
+                )
+        else:
+            message = result.abc or "Direct generation — no symbolic score."
+        return {"ui": {"text": [message]}, "result": (result, result.abc or "")}
 
 
 class FL_YuE2_Render:
@@ -49,25 +59,34 @@ class FL_YuE2_Render:
     FUNCTION = "render"
     RETURN_TYPES = ("YUE2_LATENTS",)
     RETURN_NAMES = ("music_latents",)
-    DESCRIPTION = "Turn a composition into music, then synthesize acoustic latents. Duration is a maximum: the model can finish earlier. Acoustic steps affect rendering quality, not song length."
+    DESCRIPTION = "Turn a composition into music, then synthesize acoustic latents. Duration is a maximum: the model can finish earlier. Use speed_preset for fast/balanced/quality acoustic steps; custom keeps acoustic_steps."
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
             "music_model": ("YUE2_MODEL",), "composition": ("YUE2_PLAN",),
-            "max_duration": ("INT", {"default": 360, "min": 8, "max": 360, "step": 1, "tooltip": "Maximum seconds of generated music. Increase this if the ending is cut off."}),
-            "acoustic_steps": ("INT", {"default": 32, "min": 1, "max": 64, "tooltip": "32 matches the released midpoint solver. Fewer steps are useful for quick tests."}),
+            "max_duration": ("INT", {"default": 360, "min": 8, "max": 360, "step": 1, "tooltip": "Maximum seconds of generated music. Increase this if the ending is cut off. Short connected ABC scores often end near their musical length (~8 bars ≈ 20–25s)."}),
+            "speed_preset": (["fast", "balanced", "quality", "custom"], {"default": "balanced", "tooltip": "fast=16 acoustic steps, balanced=24, quality=32. custom uses acoustic_steps."}),
+            "acoustic_steps": ("INT", {"default": 32, "min": 1, "max": 64, "tooltip": "Used when speed_preset=custom. 32 matches the released midpoint solver."}),
         }, "optional": {
             "temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05, "tooltip": "Music-token sampling randomness. 0 uses greedy sampling."}),
             "top_p": ("FLOAT", {"default": 0.95, "min": 0.01, "max": 1.0, "step": 0.01}),
             "top_k": ("INT", {"default": 100, "min": 1, "max": 1000}),
             "repetition_penalty": ("FLOAT", {"default": 1.2, "min": 0.1, "max": 3.0, "step": 0.01}),
-            "guidance": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.01, "tooltip": "1.0 is the default for score-conditioned music. Direct mode's upstream default is 1.01. Values other than 1 use two generation branches."}),
+            "guidance": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.01, "tooltip": "1.0 is the default for score-conditioned music. Direct mode's upstream default is 1.01. Values other than 1 use two generation branches (~2x AR cost)."}),
         }}
 
-    def render(self, music_model, composition, max_duration, acoustic_steps, temperature=1.0, top_p=0.95, top_k=100, repetition_penalty=1.2, guidance=1.0):
-        latent, truncated, timing = runtime.render(music_model, composition, max_duration, temperature, top_p, top_k, repetition_penalty, guidance, acoustic_steps)
-        status = "Duration limit reached — increase max_duration for a complete ending." if truncated else "Song generation complete."
+    def render(self, music_model, composition, max_duration, speed_preset, acoustic_steps, temperature=1.0, top_p=0.95, top_k=100, repetition_penalty=1.2, guidance=1.0):
+        latent, truncated, timing = runtime.render(
+            music_model, composition, max_duration, temperature, top_p, top_k, repetition_penalty, guidance, acoustic_steps,
+            speed_preset=speed_preset,
+        )
+        status = runtime.format_timing(
+            timing, truncated, timing.get("acoustic_steps", acoustic_steps),
+            timing.get("speed_preset", speed_preset), timing.get("audio_seconds"),
+        )
+        if composition.score_seconds is not None and composition.score_seconds < 45:
+            status += f" | note: score ~{composition.score_seconds:.0f}s/{composition.score_bars} bars — lengthen ABC for longer songs"
         return {"ui": {"text": [status]}, "result": (latent,)}
 
 

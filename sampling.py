@@ -6,7 +6,9 @@ from .model import StaticKVCache
 from .protocol import EOD, ABC_END, MUSIC_END, CODEC_OFFSET, CODEC_SIZE, CONTEXT
 
 
-def synchronize(device):
+def synchronize(device, enabled=True):
+    if not enabled:
+        return
     device = torch.device(device)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -15,26 +17,40 @@ def synchronize(device):
 
 
 def window_penalty(logits, recent_ids, penalty):
+    """Apply repetition penalty only to IDs seen in the window (no full-vocab buffer)."""
     if penalty == 1.0 or len(recent_ids) == 0:
         return logits
-    recent = torch.as_tensor(recent_ids, dtype=torch.long, device=logits.device).reshape(1, -1)
-    freq = torch.zeros_like(logits)
-    freq.scatter_add_(-1, recent, torch.ones_like(recent, dtype=logits.dtype))
-    alpha = penalty ** freq
-    return torch.where(logits < 0, logits * alpha, logits / alpha)
+    recent = torch.as_tensor(recent_ids, dtype=torch.long, device=logits.device)
+    unique, counts = torch.unique(recent, return_counts=True)
+    scores = logits.clone()
+    selected = scores.index_select(-1, unique)
+    alpha = penalty ** counts.to(dtype=selected.dtype)
+    scores[..., unique] = torch.where(selected < 0, selected * alpha, selected / alpha)
+    return scores
+
+
+def _mask_disallowed(scores, phase, end):
+    """In-place: keep only the native allowed band plus the phase end token."""
+    if phase == "abc":
+        if end + 1 < scores.shape[-1]:
+            scores[..., EOD:end] = float("-inf")
+            scores[..., end + 1:] = float("-inf")
+        else:
+            scores[..., EOD:end] = float("-inf")
+    else:
+        scores[..., :CODEC_OFFSET] = float("-inf")
+        scores[..., CODEC_OFFSET + CODEC_SIZE:end] = float("-inf")
+        if end + 1 < scores.shape[-1]:
+            scores[..., end + 1:] = float("-inf")
+    return scores
 
 
 def distribution(logits, sampling, history, step, phase, legacy_off=False):
     # vLLM's symbolic processor receives FP32 logits; historical off uses BF16.
     scores = logits.clone() if legacy_off else logits.float().clone()
     end = ABC_END if phase == "abc" else MUSIC_END
-    allowed = torch.full_like(scores, float("-inf"))
-    if phase == "abc":
-        allowed[..., :EOD] = 0
-    else:
-        allowed[..., CODEC_OFFSET:CODEC_OFFSET + CODEC_SIZE] = 0
-    allowed[..., end] = 0
-    scores = scores + allowed
+    _mask_disallowed(scores, phase, end)
+    # End token stays finite from the clone; clear it during the min_tokens warm-up.
     if step < sampling.min_tokens:
         scores[..., end] = -torch.inf
     scores = window_penalty(scores, history[-sampling.penalty_window:], sampling.repetition_penalty)
@@ -50,12 +66,12 @@ def distribution(logits, sampling, history, step, phase, legacy_off=False):
         removed = probabilities.cumsum(-1) - probabilities > sampling.top_p
         removed[..., :3 if legacy_off else 1] = False
         values = values.masked_fill(removed, -torch.inf)
-        scores = values.scatter(-1, indices, values)
+        scores = torch.full_like(scores, float("-inf")).scatter(-1, indices, values)
     return scores
 
 
 def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_scale=1.0,
-                    legacy_off=False, cancelled=None, on_token=None):
+                    legacy_off=False, cancelled=None, on_token=None, accurate_timing=True):
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     if len(prefix) + sampling.max_tokens > CONTEXT:
@@ -70,6 +86,7 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
     rng_device = device if device.type in {"cpu", "cuda"} else torch.device("cpu")
     generator = torch.Generator(device=rng_device).manual_seed(seed)
     config = model.config
+    use_cuda_events = accurate_timing and device.type == "cuda"
 
     def prefill(ids):
         cache = StaticKVCache(num_layers=config.num_hidden_layers, batch_size=1,
@@ -81,16 +98,26 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
         return output.logits[:, -1, :], output.past_key_values
 
     positive_cache = negative_cache = None
-    synchronize(device)
+    if use_cuda_events:
+        start_event = torch.cuda.Event(enable_timing=True)
+        prefill_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+    else:
+        synchronize(device, enabled=accurate_timing)
     start = time.perf_counter()
+    first = None
     try:
         conditional, positive_cache = prefill(prefix)
         unconditional = None
         if cfg_scale != 1.0:
             unconditional, negative_cache = prefill(negative)
-        synchronize(device)
+        if use_cuda_events:
+            prefill_event.record()
+        else:
+            synchronize(device, enabled=accurate_timing)
         prefill_seconds = time.perf_counter() - start
-        history, first, eos = [], None, False
+        history, eos = [], False
         end = ABC_END if phase == "abc" else MUSIC_END
         for step in range(sampling.max_tokens):
             if cancelled is not None and cancelled():
@@ -119,12 +146,18 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
                 conditional = model(next_id, past_key_values=positive_cache).logits[:, -1, :]
                 if negative_cache is not None:
                     unconditional = model(next_id, past_key_values=negative_cache).logits[:, -1, :]
-        synchronize(device)
-        seconds = time.perf_counter() - start
+        if use_cuda_events:
+            end_event.record()
+            end_event.synchronize()
+            seconds = start_event.elapsed_time(end_event) / 1000.0
+            prefill_seconds = start_event.elapsed_time(prefill_event) / 1000.0
+        else:
+            synchronize(device, enabled=accurate_timing)
+            seconds = time.perf_counter() - start
         count = len(history) + int(eos)
         timing = {"seconds": seconds, "prefill_seconds": prefill_seconds,
                   "ttft_seconds": first, "output_tokens": count, "content_tokens": len(history),
-                  "output_tps": count / seconds, "prefix_tokens": len(prefix),
+                  "output_tps": (count / seconds) if seconds else 0.0, "prefix_tokens": len(prefix),
                   "cfg_branches": 1 if cfg_scale == 1 else 2,
                   "execution": "comfy", "attention": "comfy"}
         return history, timing, not eos

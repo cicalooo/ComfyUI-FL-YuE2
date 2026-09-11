@@ -76,6 +76,16 @@ For generated-score editing, connect **Compose → Piano Roll → a second Compo
 
 Interaction choices follow the navigation, drawing, preview and editing patterns documented in [Ableton's MIDI editor](https://www.ableton.com/en/manual/editing-midi/) and [FL Studio's piano roll](https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/pianoroll.htm), adapted to the score controls YuE2 supports.
 
+
+
+## Speed and length tips
+
+- **AR token generation dominates runtime.** Shorter `max_duration`, supplied ABC (skip score AR), and `guidance=1.0` are the biggest wins. `guidance≠1` runs two branches (~2× AR cost).
+- **Render `speed_preset`:** `fast` (16 acoustic steps), `balanced` (24), `quality` (32), or `custom` with your own `acoustic_steps`.
+- **Render UI** shows AR tok/s, prefill time, preset, and approximate audio-token seconds after each run.
+- **Connected LLM ABC too short (~22s):** eight bars at ~90 BPM is ~20–25s of music. Use [`PROMPT_GENERATION_WITH_ABC.md`](PROMPT_GENERATION_WITH_ABC.md) with a 32–64 bar target, or extend the score in Piano Roll. Compose warns when a supplied score is under ~45s.
+- See also [`example_workflows/llm_score_to_song.json`](example_workflows/llm_score_to_song.json) for Paste/Import ABC → Compose → Render.
+
 ## Troubleshooting
 
 - **Ending cut short:** increase `max_duration`. The node reports when the token limit is reached.
