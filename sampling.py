@@ -30,18 +30,20 @@ def window_penalty(logits, recent_ids, penalty):
 
 
 def _mask_disallowed(scores, phase, end):
-    """In-place: keep only the native allowed band plus the phase end token."""
+    """In-place: keep only the native allowed band plus the phase end token.
+
+    Semantic note: MUSIC_END (end) is *before* CODEC_OFFSET, so we must not wipe
+    ``end+1:`` or the entire codec band is destroyed.
+    """
+    end_logit = scores[..., end].clone()
     if phase == "abc":
-        if end + 1 < scores.shape[-1]:
-            scores[..., EOD:end] = float("-inf")
-            scores[..., end + 1:] = float("-inf")
-        else:
-            scores[..., EOD:end] = float("-inf")
+        # Allow ordinary text tokens [0, EOD) plus ABC_END.
+        scores[..., EOD:] = float("-inf")
     else:
+        # Allow codec IDs plus MUSIC_END.
         scores[..., :CODEC_OFFSET] = float("-inf")
-        scores[..., CODEC_OFFSET + CODEC_SIZE:end] = float("-inf")
-        if end + 1 < scores.shape[-1]:
-            scores[..., end + 1:] = float("-inf")
+        scores[..., CODEC_OFFSET + CODEC_SIZE:] = float("-inf")
+    scores[..., end] = end_logit
     return scores
 
 
@@ -50,7 +52,6 @@ def distribution(logits, sampling, history, step, phase, legacy_off=False):
     scores = logits.clone() if legacy_off else logits.float().clone()
     end = ABC_END if phase == "abc" else MUSIC_END
     _mask_disallowed(scores, phase, end)
-    # End token stays finite from the clone; clear it during the min_tokens warm-up.
     if step < sampling.min_tokens:
         scores[..., end] = -torch.inf
     scores = window_penalty(scores, history[-sampling.penalty_window:], sampling.repetition_penalty)
@@ -68,6 +69,18 @@ def distribution(logits, sampling, history, step, phase, legacy_off=False):
         values = values.masked_fill(removed, -torch.inf)
         scores = torch.full_like(scores, float("-inf")).scatter(-1, indices, values)
     return scores
+
+
+def _sample_token(scores, sampling, generator, device):
+    if sampling.temperature == 0:
+        return scores.argmax(-1, keepdim=True)
+    probabilities = scores.softmax(-1)
+    # Guard against all-masked / non-finite distributions (would abort CUDA multinomial).
+    if not torch.isfinite(probabilities).all() or float(probabilities.sum()) <= 0:
+        return scores.argmax(-1, keepdim=True)
+    if device.type == "mps":
+        return torch.multinomial(probabilities.cpu(), 1, generator=generator).to(device)
+    return torch.multinomial(probabilities, 1, generator=generator)
 
 
 def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_scale=1.0,
@@ -125,14 +138,7 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
             # Preserve historical BF16 CFG subtraction/multiply/add before upcast.
             logits = conditional if cfg_scale == 1.0 else unconditional + cfg_scale * (conditional - unconditional)
             scores = distribution(logits, sampling, history, step, phase, legacy_off)
-            if sampling.temperature == 0:
-                next_id = scores.argmax(-1, keepdim=True)
-            else:
-                probabilities = scores.softmax(-1)
-                if device.type == "mps":
-                    next_id = torch.multinomial(probabilities.cpu(), 1, generator=generator).to(device)
-                else:
-                    next_id = torch.multinomial(probabilities, 1, generator=generator)
+            next_id = _sample_token(scores, sampling, generator, device)
             token = int(next_id.item())
             if first is None:
                 first = time.perf_counter() - start
@@ -163,3 +169,4 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
         return history, timing, not eos
     finally:
         positive_cache = negative_cache = None
+
